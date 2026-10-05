@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin Panel</title>
+<meta name="robots" content="noindex, nofollow" />
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #1e1e1e; color: #eee; margin: 0; }
+  a { color: #8fbf8f; }
+  .auth-screen { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .login-box { background:#2a2a2a; padding:32px; border-radius:12px; width:320px; }
+  .login-box h1 { font-size:1.3rem; margin-top:0; }
+  .login-box label { display:block; margin-top:12px; font-size:0.85rem; }
+  .login-box input { width:100%; padding:10px; margin-top:4px; border-radius:6px; border:1px solid #555; background:#1a1a1a; color:#eee; }
+  .btn { display:inline-flex; align-items:center; gap:6px; padding:10px 18px; border-radius:8px; border:none; cursor:pointer; font-size:0.9rem; margin:4px 4px 4px 0; }
+  .btn-primary { background:#5f6b4f; color:#fff; }
+  .btn-outline { background:transparent; border:1px solid #777; color:#eee; }
+  .btn-danger { background:#8a3b3b; color:#fff; }
+  .error { color:#e08a8a; margin-top:10px; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; background:#2a2a2a; flex-wrap:wrap; gap:8px; }
+  .topbar nav { display:flex; gap:6px; flex-wrap:wrap; }
+  .topbar nav button { background:#3a3a3a; color:#eee; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; }
+  .topbar nav button.active { background:#5f6b4f; }
+  main { padding: 24px; max-width: 1000px; margin: 0 auto; }
+  .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; margin:16px 0; }
+  .stat { background:#2a2a2a; padding:16px; border-radius:10px; text-align:center; }
+  .stat strong { font-size:1.5rem; display:block; }
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+  .tabs button { background:#2a2a2a; color:#ccc; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem; }
+  .tabs button.active { background:#5f6b4f; color:#fff; }
+  .field { display:block; margin-bottom:14px; }
+  .field span { display:block; font-size:0.85rem; margin-bottom:4px; color:#bbb; }
+  .field input[type=text], .field input[type=datetime-local], .field textarea { width:100%; padding:10px; border-radius:6px; border:1px solid #555; background:#1a1a1a; color:#eee; }
+  .field-checkbox { display:flex; align-items:center; gap:8px; }
+  .field-image-preview { width:100px; height:100px; object-fit:cover; border-radius:8px; display:block; margin-bottom:6px; }
+  .array-item { background:#262626; padding:14px; border-radius:10px; margin-bottom:12px; }
+  .array-item h4 { margin-top:0; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:0.85rem; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid #3a3a3a; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .toolbar input, .toolbar select { padding:8px; border-radius:6px; border:1px solid #555; background:#1a1a1a; color:#eee; }
+  .dropzone { border:2px dashed #666; border-radius:10px; padding:30px; text-align:center; margin-bottom:16px; }
+  .row-error { background: rgba(200,80,80,0.15); }
+  .row-duplicate { background: rgba(200,160,60,0.15); }
+  .muted { color:#999; font-size:0.85rem; }
+  .disclaimer { background:#3a3a1a; padding:14px; border-radius:8px; margin-bottom:16px; font-size:0.9rem; }
+  pre.msg-preview { background:#1a1a1a; padding:14px; border-radius:8px; white-space:pre-wrap; font-family:inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import { sb, defaultContent, renderInvitationHTML, escapeHtml, normalizePkNumber, generateGuestToken, fillTemplate, buildWaLink } from './shared.js';
+
+let session = null;
+let content = null;
+let guests = [];
+let currentEditorTab = 'couple';
+let guestSearch = '';
+let guestStatusFilter = 'all';
+let guestPage = 1;
+const PAGE_SIZE = 50;
+let shareIndex = 0;
+let importRows = [];
+let importMode = 'merge';
+
+const root = document.getElementById('root');
+
+function getPath(obj, path) {
+  return path.split('.').reduce((acc, k) => (acc ? acc[k] : undefined), obj);
+}
+function setPath(obj, path, value) {
+  const parts = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+  cur[parts[parts.length - 1]] = value;
+}
+function inviteUrl(token) {
+  const base = location.href.replace(/admin\.html.*$/, '');
+  return `${base}index.html?guest=${token}`;
+}
+
+// ---------- AUTH ----------
+async function checkSessionAndRender() {
+  const { data } = await sb.auth.getSession();
+  session = data.session;
+  if (!session) { renderLogin(); return; }
+  if (!content) await loadContent();
+  renderShell();
+  navigateTo('dashboard');
+}
+
+function renderLogin() {
+  root.innerHTML = `
+    <div class="auth-screen">
+      <form class="login-box" id="loginForm">
+        <h1>Admin Login</h1>
+        <label>Email<input type="email" id="loginEmail" required></label>
+        <label>Password<input type="password" id="loginPassword" required></label>
+        <p class="error" id="loginError"></p>
+        <button class="btn btn-primary" type="submit">Log in</button>
+      </form>
+    </div>`;
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('loginEmail').value;
+    const password = document.getElementById('loginPassword').value;
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) { document.getElementById('loginError').textContent = 'Invalid email or password.'; return; }
+    checkSessionAndRender();
+  });
+}
+
+async function loadContent() {
+  const { data } = await sb.from('invitation_settings').select('draft_content').eq('id', 1).single();
+  content = (data && data.draft_content && Object.keys(data.draft_content).length > 0)
+    ? data.draft_content : JSON.parse(JSON.stringify(defaultContent));
+}
+
+// ---------- SHELL / NAV ----------
+function renderShell() {
+  root.innerHTML = `
+    <div class="topbar">
+      <strong>Wedding Admin</strong>
+      <nav>
+        <button data-nav="dashboard">Dashboard</button>
+        <button data-nav="editor">Edit Invitation</button>
+        <button data-nav="import">Import Guests</button>
+        <button data-nav="guests">Guest Manager</button>
+        <button data-nav="share">Send Invitations</button>
+        <button data-nav="preview">Preview</button>
+      </nav>
+      <button class="btn btn-outline" id="logoutBtn">Log out</button>
+    </div>
+    <main id="sectionContainer"></main>
+  `;
+  root.querySelectorAll('[data-nav]').forEach(btn => btn.addEventListener('click', () => navigateTo(btn.dataset.nav)));
+  document.getElementById('logoutBtn').addEventListener('click', async () => { await sb.auth.signOut(); checkSessionAndRender(); });
+}
+
+function setActiveNav(section) {
+  document.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === section));
+}
+
+async function navigateTo(section) {
+  setActiveNav(section);
+  const c = document.getElementById('sectionContainer');
+  if (section === 'dashboard') return renderDashboard(c);
+  if (section === 'editor') return renderEditor(c);
+  if (section === 'import') return renderImport(c);
+  if (section === 'guests') { await loadGuests(); return renderGuests(c); }
+  if (section === 'share') { await loadGuests(); return renderShare(c); }
+  if (section === 'preview') { await loadGuests(); return renderPreview(c); }
+}
+
+// ---------- DASHBOARD ----------
+async function renderDashboard(c) {
+  const { data: settings } = await sb.from('invitation_settings').select('status').eq('id', 1).single();
+  const total = (await sb.from('guest_records').select('*', { count: 'exact', head: true })).count || 0;
+  const sent = (await sb.from('guest_records').select('*', { count: 'exact', head: true }).eq('workflow_status', 'sent')).count || 0;
+  const skipped = (await sb.from('guest_records').select('*', { count: 'exact', head: true }).eq('workflow_status', 'skipped')).count || 0;
+  const generated = (await sb.from('guest_records').select('*', { count: 'exact', head: true }).eq('workflow_status', 'generated')).count || 0;
+  c.innerHTML = `
+    <h1>Dashboard</h1>
+    <div class="stats-grid">
+      <div class="stat"><strong>${settings?.status ?? 'draft'}</strong><span>Invitation status</span></div>
+      <div class="stat"><strong>${total}</strong><span>Guests imported</span></div>
+      <div class="stat"><strong>${generated}</strong><span>Links generated</span></div>
+      <div class="stat"><strong>${sent}</strong><span>Marked sent</span></div>
+      <div class="stat"><strong>${skipped}</strong><span>Skipped</span></div>
+    </div>
+    <button class="btn btn-primary" data-nav="editor">Edit Invitation</button>
+    <button class="btn btn-primary" data-nav="import">Import Guests</button>
+    <button class="btn btn-primary" data-nav="share">Send Invitations</button>
+    <button class="btn btn-outline" data-nav="preview">Preview</button>
+    <button class="btn btn-outline" data-nav="guests">Guest Manager</button>
+    <button class="btn btn-outline" id="exportRsvpBtn">Export RSVP Responses (CSV)</button>
+  `;
+  c.querySelectorAll('[data-nav]').forEach(btn => btn.addEventListener('click', () => navigateTo(btn.dataset.nav)));
+  document.getElementById('exportRsvpBtn').addEventListener('click', exportRsvpCsv);
+}
+
+async function exportRsvpCsv() {
+  const { data } = await sb.from('rsvp_submissions').select('*').order('created_at', { ascending: false });
+  const rows = data || [];
+  const header = 'Name,Attendance,Message,Submitted At\n';
+  const body = rows.map(r => [r.name, r.attendance, r.message || '', r.created_at].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  downloadBlob('rsvp-responses.csv', header + body, 'text/csv');
+}
+function downloadBlob(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+}
+
+// ---------- EDITOR ----------
+const EDITOR_TABS = [
+  ['couple','Couple & Hero'], ['dates','Dates & Countdown'], ['welcome','Welcome & Heart Card'],
+  ['gallery','Gallery'], ['timeline','Timeline'], ['venue','Venue & Map'], ['dresscode','Dress Code'],
+  ['prewedding','Pre-Wedding Events'], ['transport','Transportation'], ['accommodation','Accommodation'],
+  ['gifts','Gifts'], ['rsvp','RSVP'], ['closing','Closing'], ['whatsapp','WhatsApp Message']
+];
+
+function renderEditor(c) {
+  c.innerHTML = `
+    <h1>Invitation Editor</h1>
+    <div>
+      <button class="btn btn-outline" id="saveDraftBtn">Save Draft</button>
+      <button class="btn btn-primary" id="publishBtn">Publish / Update</button>
+    </div>
+    <p id="editorStatus"></p>
+    <div class="tabs" id="editorTabs"></div>
+    <div id="editorFields"></div>
+  `;
+  document.getElementById('saveDraftBtn').addEventListener('click', saveDraft);
+  document.getElementById('publishBtn').addEventListener('click', publish);
+  const tabsEl = document.getElementById('editorTabs');
+  tabsEl.innerHTML = EDITOR_TABS.map(([id,label]) => `<button data-tab="${id}" class="${id===currentEditorTab?'active':''}">${label}</button>`).join('');
+  tabsEl.querySelectorAll('button').forEach(b => b.addEventListener('click', () => { currentEditorTab = b.dataset.tab; renderEditor(c); }));
+  renderEditorFields(document.getElementById('editorFields'));
+}
+
+async function saveDraft() {
+  const { error } = await sb.from('invitation_settings').update({ draft_content: content, updated_at: new Date().toISOString() }).eq('id', 1);
+  document.getElementById('editorStatus').textContent = error ? 'Error: ' + error.message : 'Draft saved.';
+}
+async function publish() {
+  if (!confirm('Publish now? This updates what every guest sees immediately.')) return;
+  const { error } = await sb.from('invitation_settings').update({ draft_content: content, published_content: content, status: 'published', updated_at: new Date().toISOString() }).eq('id', 1);
+  document.getElementById('editorStatus').textContent = error ? 'Error: ' + error.message : 'Published! Guests now see this version.';
+}
+
+function field(f) {
+  const val = getPath(content, f.path);
+  if (f.type === 'checkbox') return `<label class="field field-checkbox"><input type="checkbox" data-path="${f.path}" data-type="checkbox" ${val?'checked':''}> <span style="margin:0">${f.label}</span></label>`;
+  if (f.type === 'textarea') return `<label class="field"><span>${f.label}</span><textarea data-path="${f.path}" rows="4">${escapeHtml(val||'')}</textarea></label>`;
+  if (f.type === 'image') return `<label class="field"><span>${f.label}</span>${val?`<img class="field-image-preview" src="${escapeHtml(val)}">`:''}<input type="file" accept="image/*" data-image-path="${f.path}"></label>`;
+  if (f.type === 'datetime') { const iso = val ? new Date(val).toISOString().slice(0,16) : ''; return `<label class="field"><span>${f.label}</span><input type="datetime-local" data-path="${f.path}" data-type="datetime" value="${iso}"></label>`; }
+  if (f.type === 'csv') return `<label class="field"><span>${f.label}</span><input type="text" data-path="${f.path}" data-type="csv" value="${escapeHtml((val||[]).join(', '))}"></label>`;
+  return `<label class="field"><span>${f.label}</span><input type="text" data-path="${f.path}" value="${escapeHtml(val||'')}"></label>`;
+}
+
+function renderEditorFields(c) {
+  let html = '';
+  if (currentEditorTab === 'couple') {
+    html = [
+      field({path:'couple.groomName',label:'Groom name'}),
+      field({path:'couple.brideName',label:'Bride name'}),
+      field({path:'couple.groomParents',label:'Groom parents line'}),
+      field({path:'couple.groomEducation',label:'Groom education'}),
+      field({path:'couple.groomJob',label:'Groom job'}),
+      field({path:'couple.brideParents',label:'Bride parents line'}),
+      field({path:'couple.brideEducation',label:'Bride education'}),
+      field({path:'couple.brideJob',label:'Bride job'}),
+      field({path:'couple.showParentDetails',label:'Show parent/profession details',type:'checkbox'}),
+      field({path:'hero.headingScript',label:'Hero heading'}),
+      field({path:'hero.imageUrl',label:'Hero image',type:'image'})
+    ].join('');
+  } else if (currentEditorTab === 'dates') {
+    html = [
+      field({path:'dates.weddingDateISO',label:'Wedding date & time',type:'datetime'}),
+      field({path:'dates.weddingDateLabel',label:'Date label (shown on card)'}),
+      field({path:'dates.weddingDayLabel',label:'Day label'}),
+      field({path:'dates.weddingTimeLabel',label:'Time label'})
+    ].join('');
+  } else if (currentEditorTab === 'welcome') {
+    html = [
+      field({path:'welcome.text',label:'Welcome paragraph (use {{coupleName}})',type:'textarea'}),
+      field({path:'heartCard.ctaLabel',label:'Save-the-date button label'}),
+      field({path:'heartCard.icsEnabled',label:'Enable calendar download button',type:'checkbox'})
+    ].join('');
+  } else if (currentEditorTab === 'gallery') {
+    html = field({path:'gallery.enabled',label:'Show gallery section',type:'checkbox'});
+    content.gallery.images.forEach((img,i) => {
+      html += `<div class="array-item"><h4>Image ${i+1}</h4>
+        ${field({path:`gallery.images.${i}.url`,label:'Image',type:'image'})}
+        ${field({path:`gallery.images.${i}.alt`,label:'Alt text'})}
+        ${field({path:`gallery.images.${i}.caption`,label:'Caption (optional)'})}
+        <button type="button" class="btn btn-outline" data-remove-array="gallery.images" data-index="${i}">Remove image</button>
+      </div>`;
+    });
+    html += `<button type="button" class="btn btn-primary" data-add-array="gallery.images" data-template='{"url":"","alt":"Wedding photo"}'>+ Add image</button>`;
+  } else if (currentEditorTab === 'timeline') {
+    html = field({path:'timeline.heading',label:'Section heading'});
+    content.timeline.items.forEach((it,i) => {
+      html += `<div class="array-item"><h4>Item ${i+1}</h4>
+        ${field({path:`timeline.items.${i}.dateGroup`,label:'Date group (e.g. SUNDAY, JAN. 31, 2027)'})}
+        ${field({path:`timeline.items.${i}.time`,label:'Time'})}
+        ${field({path:`timeline.items.${i}.title`,label:'Title'})}
+        ${field({path:`timeline.items.${i}.description`,label:'Description',type:'textarea'})}
+        <button type="button" class="btn btn-outline" data-remove-array="timeline.items" data-index="${i}">Remove item</button>
+      </div>`;
+    });
+    html += `<button type="button" class="btn btn-primary" data-add-array="timeline.items" data-template='{"dateGroup":"","time":"","title":"","description":""}'>+ Add timeline item</button>`;
+  } else if (currentEditorTab === 'venue') {
+    html = [
+      field({path:'venue.heading',label:'Section heading'}),
+      field({path:'venue.name',label:'Venue name'}),
+      field({path:'venue.address',label:'Address'}),
+      field({path:'venue.mapsUrl',label:'Google Maps URL'}),
+      field({path:'venue.embedUrl',label:'Embed/iframe URL (optional)'}),
+      field({path:'venue.buttonLabel',label:'Map button label'})
+    ].join('');
+  } else if (currentEditorTab === 'dresscode') {
+    html = [
+      field({path:'dressCode.enabled',label:'Show this section',type:'checkbox'}),
+      field({path:'dressCode.heading',label:'Heading'}),
+      field({path:'dressCode.women.title',label:'Women title'}),
+      field({path:'dressCode.women.desc',label:'Women description',type:'textarea'}),
+      field({path:'dressCode.men.title',label:'Men title'}),
+      field({path:'dressCode.men.desc',label:'Men description',type:'textarea'})
+    ].join('');
+  } else if (currentEditorTab === 'prewedding') {
+    html = [field({path:'preWeddingEvents.enabled',label:'Show this section',type:'checkbox'}), field({path:'preWeddingEvents.heading',label:'Heading'})].join('');
+    content.preWeddingEvents.events.forEach((ev,i) => {
+      html += `<div class="array-item"><h4>Event ${i+1}</h4>
+        ${field({path:`preWeddingEvents.events.${i}.name`,label:'Name'})}
+        ${field({path:`preWeddingEvents.events.${i}.date`,label:'Date'})}
+        ${field({path:`preWeddingEvents.events.${i}.time`,label:'Time'})}
+        ${field({path:`preWeddingEvents.events.${i}.location`,label:'Location'})}
+        <button type="button" class="btn btn-outline" data-remove-array="preWeddingEvents.events" data-index="${i}">Remove event</button>
+      </div>`;
+    });
+    html += `<button type="button" class="btn btn-primary" data-add-array="preWeddingEvents.events" data-template='{"name":"","date":"","time":"","location":""}'>+ Add event</button>`;
+  } else if (currentEditorTab === 'transport') {
+    html = [
+      field({path:'transportation.enabled',label:'Show this section',type:'checkbox'}),
+      field({path:'transportation.heading',label:'Heading'}),
+      field({path:'transportation.text',label:'Description',type:'textarea'}),
+      field({path:'transportation.directionsUrl',label:'Directions link (optional)'})
+    ].join('');
+  } else if (currentEditorTab === 'accommodation') {
+    html = [
+      field({path:'accommodation.enabled',label:'Show this section',type:'checkbox'}),
+      field({path:'accommodation.heading',label:'Heading'}),
+      field({path:'accommodation.hotelName',label:'Hotel name'}),
+      field({path:'accommodation.distance',label:'Distance'}),
+      field({path:'accommodation.bookingUrl',label:'Booking URL'}),
+      field({path:'accommodation.code',label:'Promo code'}),
+      field({path:'accommodation.text',label:'Description',type:'textarea'})
+    ].join('');
+  } else if (currentEditorTab === 'gifts') {
+    html = [
+      field({path:'gifts.enabled',label:'Show this section',type:'checkbox'}),
+      field({path:'gifts.heading',label:'Heading'}),
+      field({path:'gifts.text',label:'Description',type:'textarea'}),
+      field({path:'gifts.link',label:'Optional link'})
+    ].join('');
+  } else if (currentEditorTab === 'rsvp') {
+    html = [
+      field({path:'rsvp.enabled',label:'Show this section',type:'checkbox'}),
+      field({path:'rsvp.heading',label:'Heading'}),
+      field({path:'rsvp.nameLabel',label:'Name field label'}),
+      field({path:'rsvp.attendanceLabel',label:'Attendance label'}),
+      field({path:'rsvp.attendanceOptions',label:'Attendance options (comma separated)',type:'csv'}),
+      field({path:'rsvp.messageLabel',label:'Message label'}),
+      field({path:'rsvp.messagePlaceholder',label:'Message placeholder'}),
+      field({path:'rsvp.submitLabel',label:'Submit button label'}),
+      field({path:'rsvp.successMessage',label:'Success message',type:'textarea'})
+    ].join('');
+  } else if (currentEditorTab === 'closing') {
+    html = [
+      field({path:'closing.heading',label:'Closing heading'}),
+      field({path:'closing.footerLinkText',label:'Footer link text (optional)'}),
+      field({path:'closing.footerLinkUrl',label:'Footer link URL (optional)'})
+    ].join('');
+  } else if (currentEditorTab === 'whatsapp') {
+    html = `<p class="muted">Variables: {{guestName}} {{invitationUrl}} {{coupleName}} {{weddingDate}}</p>` +
+      field({path:'whatsappTemplate',label:'WhatsApp message template',type:'textarea'});
+  }
+  c.innerHTML = html;
+
+  c.querySelectorAll('[data-path]').forEach(el => {
+    const handler = () => {
+      const path = el.dataset.path;
+      let value;
+      if (el.dataset.type === 'checkbox') value = el.checked;
+      else if (el.dataset.type === 'csv') value = el.value.split(',').map(s=>s.trim()).filter(Boolean);
+      else if (el.dataset.type === 'datetime') value = el.value ? new Date(el.value).toISOString() : '';
+      else value = el.value;
+      setPath(content, path, value);
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+
+  c.querySelectorAll('[data-image-path]').forEach(el => {
+    el.addEventListener('change', async () => {
+      const file = el.files[0]; if (!file) return;
+      const path = el.dataset.imagePath;
+      const filePath = `${Date.now()}-${file.name.replace(/[^a-z0-9.\-_]/gi,'_')}`;
+      const { error } = await sb.storage.from('invitation-media').upload(filePath, file, { upsert: true });
+      if (error) { alert('Upload failed: ' + error.message); return; }
+      const { data } = sb.storage.from('invitation-media').getPublicUrl(filePath);
+      setPath(content, path, data.publicUrl);
+      renderEditorFields(c);
+    });
+  });
+
+  c.querySelectorAll('[data-remove-array]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const arr = getPath(content, btn.dataset.removeArray);
+      arr.splice(parseInt(btn.dataset.index,10), 1);
+      renderEditorFields(c);
+    });
+  });
+  c.querySelectorAll('[data-add-array]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const arr = getPath(content, btn.dataset.addArray);
+      arr.push(JSON.parse(btn.dataset.template));
+      renderEditorFields(c);
+    });
+  });
+}
+
+// ---------- IMPORT ----------
+const NAME_KEYS = ['name','guest name','guest'];
+const PHONE_KEYS = ['whatsapp number','whatsapp','phone','mobile','number'];
+
+function renderImport(c) {
+  c.innerHTML = `
+    <h1>Import Guests</h1>
+    <div class="dropzone" id="dropzone">
+      <p>Drag & drop a .xlsx or .csv file here, or choose one:</p>
+      <input type="file" id="fileInput" accept=".xlsx,.csv">
+    </div>
+    <div id="importResults"></div>
+  `;
+  const dz = document.getElementById('dropzone');
+  dz.addEventListener('dragover', e => e.preventDefault());
+  dz.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+  document.getElementById('fileInput').addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+}
+
+function detectKey(headers, candidates) {
+  return headers.find(h => candidates.includes(h.trim().toLowerCase()));
+}
+
+async function handleFile(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+  const results = document.getElementById('importResults');
+  if (json.length === 0) { results.innerHTML = '<p>No rows found in file.</p>'; return; }
+
+  const headers = Object.keys(json[0]);
+  const nameKey = detectKey(headers, NAME_KEYS);
+  const phoneKey = detectKey(headers, PHONE_KEYS);
+  if (!nameKey || !phoneKey) {
+    results.innerHTML = `<p>Could not detect columns. Found headers: ${headers.join(', ')}. Expected a Name column and a WhatsApp Number column.</p>`;
+    return;
+  }
+
+  const seen = new Map();
+  importRows = json.map((r, i) => {
+    const name = String(r[nameKey] || '').trim();
+    const rawNumber = String(r[phoneKey] || '').trim();
+    const { normalized, valid, reason } = normalizePkNumber(rawNumber);
+    let duplicateOf;
+    if (valid && normalized) { if (seen.has(normalized)) duplicateOf = seen.get(normalized); else seen.set(normalized, i); }
+    return { name: name || '(missing name)', rawNumber, normalized, valid: valid && !!name, reason: !name ? 'Missing guest name' : reason, duplicateOf };
+  });
+
+  const validCount = importRows.filter(r => r.valid && r.duplicateOf === undefined).length;
+  const invalidCount = importRows.filter(r => !r.valid).length;
+  const dupCount = importRows.filter(r => r.duplicateOf !== undefined).length;
+
+  results.innerHTML = `
+    <p>Parsed ${importRows.length} rows. <strong>${validCount}</strong> valid & unique, <strong>${invalidCount}</strong> invalid, <strong>${dupCount}</strong> duplicates.</p>
+    <div>
+      <label><input type="radio" name="mode" value="merge" checked> Merge / update (keeps existing links working)</label><br>
+      <label><input type="radio" name="mode" value="replace"> Replace entire list (breaks old links)</label>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Raw number</th><th>Normalized</th><th>Issue</th></tr></thead>
+      <tbody>${importRows.slice(0,500).map((r,i) => `
+        <tr class="${!r.valid?'row-error':r.duplicateOf!==undefined?'row-duplicate':''}">
+          <td>${i+1}</td><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.rawNumber)}</td><td>${r.normalized||'—'}</td>
+          <td>${!r.valid ? r.reason : r.duplicateOf!==undefined ? 'Duplicate of row '+(r.duplicateOf+1) : 'OK'}</td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <button class="btn btn-primary" id="confirmImportBtn">Confirm Import</button>
+    <p id="importStatus"></p>
+  `;
+  results.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', e => importMode = e.target.value));
+  document.getElementById('confirmImportBtn').addEventListener('click', confirmImport);
+}
+
+async function confirmImport() {
+  const statusEl = document.getElementById('importStatus');
+  const good = importRows.filter(r => r.valid && r.duplicateOf === undefined && r.normalized);
+  if (importMode === 'replace') {
+    if (!confirm('Replace mode deletes the entire existing guest list and regenerates ALL tokens. Previously sent links will stop working. Continue?')) return;
+    await sb.from('guest_records').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  }
+  let created = 0, updated = 0;
+  statusEl.textContent = 'Importing…';
+  for (const row of good) {
+    const { data: existing } = await sb.from('guest_records').select('id').eq('normalized_phone', row.normalized).maybeSingle();
+    if (existing) {
+      await sb.from('guest_records').update({ display_name: row.name, original_number: row.rawNumber, updated_at: new Date().toISOString() }).eq('id', existing.id);
+      updated++;
+    } else {
+      await sb.from('guest_records').insert({ public_token: generateGuestToken(), display_name: row.name, normalized_phone: row.normalized, original_number: row.rawNumber, workflow_status: 'generated' });
+      created++;
+    }
+  }
+  statusEl.textContent = `Import complete: ${created} new guests, ${updated} updated. Existing guest links were preserved.`;
+  importRows = [];
+}
+
+// ---------- GUEST MANAGER ----------
+async function loadGuests() {
+  const { data } = await sb.from('guest_records').select('*').order('display_name');
+  guests = data || [];
+}
+
+function renderGuests(c) {
+  const filtered = guests.filter(g =>
+    (guestStatusFilter === 'all' || g.workflow_status === guestStatusFilter) &&
+    g.display_name.toLowerCase().includes(guestSearch.toLowerCase())
+  );
+  const pageItems = filtered.slice((guestPage-1)*PAGE_SIZE, guestPage*PAGE_SIZE);
+  c.innerHTML = `
+    <h1>Guest Manager</h1>
+    <p class="muted">Statuses are admin-side workflow labels only, not WhatsApp delivery/read confirmations.</p>
+    <div class="toolbar">
+      <input type="text" id="guestSearch" placeholder="Search by name…" value="${escapeHtml(guestSearch)}">
+      <select id="guestStatusFilter">
+        <option value="all">All statuses</option>
+        <option value="generated">Generated</option>
+        <option value="whatsapp_opened">WhatsApp opened</option>
+        <option value="sent">Marked sent</option>
+        <option value="skipped">Skipped</option>
+        <option value="failed">Failed</option>
+      </select>
+      <button class="btn btn-outline" id="exportGuestsBtn">Export CSV</button>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Number</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${pageItems.map((g,i) => `
+        <tr>
+          <td>${(guestPage-1)*PAGE_SIZE+i+1}</td>
+          <td>${escapeHtml(g.display_name)}</td>
+          <td>${g.normalized_phone}</td>
+          <td>${g.workflow_status}</td>
+          <td>
+            <button class="btn btn-outline" data-copy="${inviteUrl(g.public_token)}">Copy link</button>
+            <button class="btn btn-outline" data-mark="${g.id}:sent">Mark sent</button>
+            <button class="btn btn-outline" data-mark="${g.id}:skipped">Skip</button>
+            <button class="btn btn-outline" data-regen="${g.id}">Regenerate</button>
+            <button class="btn btn-danger" data-delete="${g.id}">Delete</button>
+          </td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <div>
+      <button class="btn btn-outline" id="prevPage" ${guestPage===1?'disabled':''}>Prev</button>
+      <span>Page ${guestPage} of ${Math.max(1, Math.ceil(filtered.length/PAGE_SIZE))}</span>
+      <button class="btn btn-outline" id="nextPage" ${guestPage*PAGE_SIZE>=filtered.length?'disabled':''}>Next</button>
+    </div>
+  `;
+  document.getElementById('guestSearch').addEventListener('input', e => { guestSearch = e.target.value; guestPage=1; renderGuests(c); });
+  document.getElementById('guestStatusFilter').addEventListener('change', e => { guestStatusFilter = e.target.value; guestPage=1; renderGuests(c); });
+  document.getElementById('exportGuestsBtn').addEventListener('click', exportGuestsCsv);
+  document.getElementById('prevPage').addEventListener('click', () => { guestPage--; renderGuests(c); });
+  document.getElementById('nextPage').addEventListener('click', () => { guestPage++; renderGuests(c); });
+  c.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => navigator.clipboard.writeText(b.dataset.copy)));
+  c.querySelectorAll('[data-mark]').forEach(b => b.addEventListener('click', async () => {
+    const [id, status] = b.dataset.mark.split(':');
+    await sb.from('guest_records').update({ workflow_status: status, sent_at: status==='sent' ? new Date().toISOString() : null }).eq('id', id);
+    await loadGuests(); renderGuests(c);
+  }));
+  c.querySelectorAll('[data-regen]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Regenerate this guest\'s link? Their OLD link will stop working.')) return;
+    await sb.from('guest_records').update({ public_token: generateGuestToken() }).eq('id', b.dataset.regen);
+    await loadGuests(); renderGuests(c);
+  }));
+  c.querySelectorAll('[data-delete]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Delete this guest permanently?')) return;
+    await sb.from('guest_records').delete().eq('id', b.dataset.delete);
+    await loadGuests(); renderGuests(c);
+  }));
+}
+
+function exportGuestsCsv() {
+  const header = 'Name,Normalized Number,Invitation URL,Status\n';
+  const body = guests.map(g => [g.display_name, g.normalized_phone, inviteUrl(g.public_token), g.workflow_status].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  downloadBlob('guest-status-export.csv', header + body, 'text/csv');
+}
+
+// ---------- SHARING ----------
+function renderShare(c) {
+  if (guests.length === 0) { c.innerHTML = '<h1>Send Invitations</h1><p>No guests imported yet.</p>'; return; }
+  if (shareIndex >= guests.length) shareIndex = 0;
+  const guest = guests[shareIndex];
+  const coupleName = `${content.couple.groomName} & ${content.couple.brideName}`;
+  const invitationUrl = inviteUrl(guest.public_token);
+  const message = fillTemplate(content.whatsappTemplate, { guestName: guest.display_name, invitationUrl, coupleName, weddingDate: content.dates.weddingDateLabel });
+  c.innerHTML = `
+    <h1>Send Invitations</h1>
+    <div class="disclaimer"><strong>Free mode opens WhatsApp with a personalized message.</strong> You must press Send inside WhatsApp for each guest. Delivery/read status is not available without the official WhatsApp Business API.</div>
+    <p>Guest ${shareIndex+1} of ${guests.length}: <strong>${escapeHtml(guest.display_name)}</strong> (${guest.normalized_phone})</p>
+    <p>Status: ${guest.workflow_status}</p>
+    <pre class="msg-preview">${escapeHtml(message)}</pre>
+    <button class="btn btn-primary" id="sendWaBtn">Send on WhatsApp</button>
+    <button class="btn btn-outline" id="copyLinkBtn">Copy link</button>
+    <button class="btn btn-outline" id="copyMsgBtn">Copy message</button>
+    <button class="btn btn-outline" id="markSentBtn">Mark as sent</button>
+    <button class="btn btn-outline" id="skipBtn">Skip</button>
+    <div style="margin-top:16px">
+      <button class="btn btn-outline" id="prevGuestBtn" ${shareIndex===0?'disabled':''}>← Previous</button>
+      <button class="btn btn-outline" id="nextGuestBtn" ${shareIndex>=guests.length-1?'disabled':''}>Next →</button>
+    </div>
+  `;
+  document.getElementById('sendWaBtn').addEventListener('click', async () => {
+    window.open(buildWaLink(guest.normalized_phone, message), '_blank');
+    await sb.from('guest_records').update({ workflow_status: 'whatsapp_opened' }).eq('id', guest.id);
+    guest.workflow_status = 'whatsapp_opened'; renderShare(c);
+  });
+  document.getElementById('copyLinkBtn').addEventListener('click', () => navigator.clipboard.writeText(invitationUrl));
+  document.getElementById('copyMsgBtn').addEventListener('click', () => navigator.clipboard.writeText(message));
+  document.getElementById('markSentBtn').addEventListener('click', async () => {
+    await sb.from('guest_records').update({ workflow_status: 'sent', sent_at: new Date().toISOString() }).eq('id', guest.id);
+    guest.workflow_status = 'sent'; renderShare(c);
+  });
+  document.getElementById('skipBtn').addEventListener('click', async () => {
+    await sb.from('guest_records').update({ workflow_status: 'skipped' }).eq('id', guest.id);
+    guest.workflow_status = 'skipped'; renderShare(c);
+  });
+  document.getElementById('prevGuestBtn').addEventListener('click', () => { shareIndex--; renderShare(c); });
+  document.getElementById('nextGuestBtn').addEventListener('click', () => { shareIndex++; renderShare(c); });
+}
+
+// ---------- PREVIEW ----------
+function renderPreview(c) {
+  c.innerHTML = `
+    <h1>Preview (unpublished draft)</h1>
+    <label>Preview as guest:
+      <select id="previewGuestSelect">
+        <option value="Guest">— generic preview —</option>
+        ${guests.map(g => `<option value="${escapeHtml(g.display_name)}">${escapeHtml(g.display_name)}</option>`).join('')}
+      </select>
+    </label>
+    <button class="btn btn-primary" id="openPreviewBtn">Open Preview in New Tab</button>
+    <p class="muted">Opens your current unsaved draft content (not what's published) in a new tab.</p>
+  `;
+  document.getElementById('openPreviewBtn').addEventListener('click', () => {
+    const guestName = document.getElementById('previewGuestSelect').value;
+    const styleHref = new URL('style.css', location.href).href;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="${styleHref}"></head><body><main class="invitation">${renderInvitationHTML(content, guestName)}</main><script>
+      (function(){
+        var target = new Date(${JSON.stringify(content.dates.weddingDateISO)}).getTime();
+        function tick(){
+          var diff = target - Date.now();
+          var d = Math.max(0,Math.floor(diff/86400000)), h = Math.max(0,Math.floor(diff/3600000)%24), m = Math.max(0,Math.floor(diff/60000)%60), s = Math.max(0,Math.floor(diff/1000)%60);
+          var set=(id,v)=>{var el=document.getElementById(id); if(el) el.textContent=String(v).padStart(2,'0');};
+          set('cd-days',d); set('cd-hours',h); set('cd-minutes',m); set('cd-seconds',s);
+        }
+        tick(); setInterval(tick,1000);
+        document.querySelectorAll('.reveal').forEach(el => el.classList.add('is-visible'));
+      })();
+    <\/script></body></html>`;
+    const blob = new Blob([html], { type: 'text/html' });
+    window.open(URL.createObjectURL(blob), '_blank');
+  });
+}
+
+checkSessionAndRender();
+</script>
+</body>
+</html>
