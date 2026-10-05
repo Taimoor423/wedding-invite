@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>You're Invited</title>
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="root">
+    <div class="loading-screen" role="status" aria-live="polite"><p>PREPARING YOUR INVITATION</p></div>
+  </div>
+
+  <script type="module">
+    import { sb, defaultContent, renderInvitationHTML, attachInvitationBehavior } from './shared.js';
+
+    async function init() {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('guest');
+
+      let content = defaultContent;
+      try {
+        const { data } = await sb.rpc('get_published_invitation');
+        if (data && Object.keys(data).length > 0) content = data;
+      } catch (e) { /* fall back silently to defaultContent */ }
+
+      let guestName = 'Guest';
+      if (token) {
+        try {
+          const { data } = await sb.rpc('get_guest_public', { p_token: token });
+          if (data && data[0] && data[0].display_name) guestName = data[0].display_name;
+        } catch (e) { /* invalid token -> stays "Guest" */ }
+      }
+
+      const root = document.getElementById('root');
+      root.innerHTML = `<main class="invitation">${renderInvitationHTML(content, guestName)}</main>`;
+      attachInvitationBehavior(content, token);
+    }
+
+    init();
+  </script>
+</body>
+</html>
